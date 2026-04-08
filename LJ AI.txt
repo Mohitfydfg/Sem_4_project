@@ -1,0 +1,155 @@
+import streamlit as st
+from sqlalchemy import create_engine, text
+from langchain_community.llms import Ollama
+from langchain_community.utilities import SQLDatabase
+from langchain_community.agent_toolkits import create_sql_agent
+
+# -----------------------------
+# CONFIG
+# -----------------------------
+st.set_page_config(page_title="🎓 LJ University AI", layout="wide")
+
+# -----------------------------
+# CACHE: DB + LLM + AGENT
+# -----------------------------
+@st.cache_resource
+def load_system():
+    engine = create_engine(
+        "mysql+mysqlconnector://root:password@localhost/university_ai"
+    )
+    db = SQLDatabase(engine)
+
+    llm = Ollama(model="llama3")
+
+    agent = create_sql_agent(
+        llm=llm,
+        db=db,
+        verbose=False,
+        handle_parsing_errors=True,
+        return_direct= True
+    )
+
+    return engine, agent
+
+
+engine, agent = load_system()
+
+# -----------------------------
+# SESSION STATE (CHAT HISTORY)
+# -----------------------------
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+# -----------------------------
+# UI
+# -----------------------------
+st.title("🎓 LJ University AI Assistant")
+st.caption("Ask about faculties, departments, scholarships, etc.")
+
+# Chat display
+for chat in st.session_state.chat_history:
+    with st.chat_message(chat["role"]):
+        st.markdown(chat["content"])
+
+# -----------------------------
+# INPUT
+# -----------------------------
+user_input = st.chat_input("Ask your question...")
+
+# -----------------------------
+# STRICT PROMPT (NO HALLUCINATION)
+# -----------------------------
+
+
+SYSTEM_PROMPT = """
+You are a MySQL database assistant.
+
+STRICT RULES:
+- Only use given tables
+- Column names are:
+  id, name, department, experience_years, salary
+- Never assume anything
+- If no result → return "No data found"
+- Return only final answer (no explanation)
+
+Example:
+id	name	department	experience(years)	salary
+1	alok manke	MCA	12	180000
+2	virendra ingle	MCA	10	80000
+3	sarfaraj patel	MCA	6	60000
+4	kamiya	MCA	5	55000
+5	sejal	MCA	7	56000
+6	seenu	computer engeneering	9	47000
+7	suraj	M.tech	10	55000
+8	shubham	computer engeneering	11	100000
+9	om patel	computer engeneering	5	78000
+10	mohit rajput	Data analysis	13	195000
+
+"""
+
+# -----------------------------
+# HANDLE QUERY
+# -----------------------------
+if user_input:
+    # Show user message
+    st.session_state.chat_history.append(
+        {"role": "user", "content": user_input}
+    )
+
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            try:
+                result = agent.invoke({
+                    "input": SYSTEM_PROMPT + "\nQuestion: " + user_input
+                })
+
+                output = result.get("output") if isinstance(result, dict) else str(result)
+
+                # fallback safety
+                if not output or "I don't know" in output.lower():
+                    output = "No data found"
+
+            except Exception:
+                output = "Error fetching data"
+
+            st.markdown(output)
+
+            # Save response
+            st.session_state.chat_history.append(
+                {"role": "assistant", "content": output}
+            )
+
+# -----------------------------
+# SIDEBAR (SCHOLARSHIP FILTER)
+# -----------------------------
+st.sidebar.title("🎯 Scholarship Finder")
+
+caste = st.sidebar.selectbox("Caste", ["SC", "OBC", "General"])
+income = st.sidebar.number_input("Annual Income", min_value=0)
+
+if st.sidebar.button("Find Scholarships"):
+    try:
+        with engine.connect() as conn:
+            query = text("""
+                SELECT name, amount 
+                FROM scholarships 
+                WHERE caste = :caste 
+                AND income_limit >= :income
+            """)
+            rows = conn.execute(query, {
+                "caste": caste,
+                "income": income
+            }).fetchall()
+
+            if rows:
+                st.sidebar.success("Eligible Scholarships:")
+                for r in rows:
+                    st.sidebar.write(f"{r[0]} - ₹{r[1]}")
+            else:
+                st.sidebar.warning("No scholarships found")
+
+    except Exception:
+        st.sidebar.error("Database error")
